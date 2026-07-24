@@ -34,17 +34,20 @@ struct OnboardingBalancedText: UIViewRepresentable {
     let text: String
     let role: Role
     let alignment: TextAlignment
+    let maximumNumberOfLines: Int?
 
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     init(
         _ text: String,
         role: Role,
-        alignment: TextAlignment
+        alignment: TextAlignment,
+        maximumNumberOfLines: Int? = nil
     ) {
         self.text = text
         self.role = role
         self.alignment = alignment
+        self.maximumNumberOfLines = maximumNumberOfLines
     }
 
     func makeUIView(context: Context) -> OnboardingBalancedLabel {
@@ -64,6 +67,22 @@ struct OnboardingBalancedText: UIViewRepresentable {
 
     func updateUIView(_ label: OnboardingBalancedLabel, context: Context) {
         _ = dynamicTypeSize
+        Self.configure(
+            label,
+            text: text,
+            role: role,
+            alignment: alignment,
+            maximumNumberOfLines: maximumNumberOfLines
+        )
+    }
+
+    static func configure(
+        _ label: OnboardingBalancedLabel,
+        text: String,
+        role: Role,
+        alignment: TextAlignment,
+        maximumNumberOfLines: Int?
+    ) {
         let descriptor = UIFontDescriptor.preferredFontDescriptor(
             withTextStyle: role.textStyle
         )
@@ -73,6 +92,7 @@ struct OnboardingBalancedText: UIViewRepresentable {
         )
 
         label.text = text
+        label.numberOfLines = maximumNumberOfLines ?? 0
         label.font = UIFontMetrics(forTextStyle: role.textStyle)
             .scaledFont(for: baseFont)
         label.textColor = role.color
