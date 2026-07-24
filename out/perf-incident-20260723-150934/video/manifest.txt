@@ -1,0 +1,13 @@
+video=out/perf-incident-20260723-150934/raw/repro.mp4
+frames_dir=out/perf-incident-20260723-150934/video/frames
+contact_sheet=out/perf-incident-20260723-150934/video/contact-sheet.png
+start=0
+duration=9.4
+fps=12
+cols=6
+thumb_width=360
+frame_count=113
+annotations=1
+label=
+mode_label=
+success_criteria=Tap on the final transcript row presents a stable viewer without terminating the app; unloaded media reserves its final aspect-ratio geometry without row-height jumps.
