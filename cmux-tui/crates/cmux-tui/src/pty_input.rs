@@ -49,12 +49,14 @@ pub struct PtyInputEvent {
     pub surface_id: SurfaceId,
     pub surface: SurfaceHandle,
     pub bytes: PtyInputBytes,
+    retained_bytes: usize,
     pub kind: PtyInputKind,
     mutation: Option<Box<dyn FnOnce() -> anyhow::Result<()> + Send>>,
     after_operation: Option<Box<dyn FnOnce() + Send>>,
     on_superseded: Option<Box<dyn FnOnce() + Send>>,
     label: &'static str,
     coalesce_key: Option<(&'static str, u64)>,
+    failure_surface_id: Option<SurfaceId>,
     remote: bool,
     reservation_id: Option<u64>,
     remote_release_attempts: u8,
@@ -72,12 +74,14 @@ impl PtyInputEvent {
             surface_id,
             surface,
             bytes,
+            retained_bytes: 0,
             kind,
             mutation: None,
             after_operation: None,
             on_superseded: None,
             label: "PTY input",
             coalesce_key: None,
+            failure_surface_id: None,
             remote,
             reservation_id: None,
             remote_release_attempts: 0,
@@ -105,9 +109,28 @@ impl PtyInputEvent {
         Self::mutation_with_superseded(label, coalesce_key, remote, None, None, operation)
     }
 
+    #[cfg(test)]
     fn mutation_with_superseded(
         label: &'static str,
         coalesce_key: Option<(&'static str, u64)>,
+        remote: bool,
+        on_superseded: Option<Box<dyn FnOnce() + Send>>,
+        after_operation: Option<Box<dyn FnOnce() + Send>>,
+        operation: impl FnOnce() -> anyhow::Result<()> + Send + 'static,
+    ) -> Self {
+        Self::mutation_for_surface(
+            label,
+            PtyMutationIdentity { coalesce_key, ..Default::default() },
+            remote,
+            on_superseded,
+            after_operation,
+            operation,
+        )
+    }
+
+    fn mutation_for_surface(
+        label: &'static str,
+        identity: PtyMutationIdentity,
         remote: bool,
         on_superseded: Option<Box<dyn FnOnce() + Send>>,
         after_operation: Option<Box<dyn FnOnce() + Send>>,
@@ -117,16 +140,22 @@ impl PtyInputEvent {
             surface_id: 0,
             surface: SurfaceHandle::RemoteBrowserUnsupported,
             bytes: PtyInputBytes::new(),
+            retained_bytes: identity.retained_bytes,
             kind: PtyInputKind::Mutation,
             mutation: Some(Box::new(operation)),
             after_operation,
             on_superseded,
             label,
-            coalesce_key,
+            coalesce_key: identity.coalesce_key,
+            failure_surface_id: identity.failure_surface_id,
             remote,
             reservation_id: None,
             remote_release_attempts: 0,
         }
+    }
+
+    fn queued_byte_len(&self) -> usize {
+        self.bytes.len().saturating_add(self.retained_bytes)
     }
 }
 
@@ -220,6 +249,13 @@ pub struct PtyInputSender {
     on_failure: Arc<dyn Fn(PtyOperationFailure) + Send + Sync>,
 }
 
+#[derive(Clone, Copy, Default)]
+struct PtyMutationIdentity {
+    coalesce_key: Option<(&'static str, u64)>,
+    failure_surface_id: Option<SurfaceId>,
+    retained_bytes: usize,
+}
+
 impl PtyInputDispatcher {
     pub fn spawn(
         on_failure: impl Fn(PtyOperationFailure) + Send + Sync + 'static,
@@ -295,6 +331,11 @@ impl PtyInputSender {
         *self.queue.after_operation_before_cleanup.lock().unwrap() = hook;
     }
 
+    #[cfg(test)]
+    pub fn queued_bytes_for_test(&self) -> usize {
+        self.queue.state.lock().unwrap().queued_bytes
+    }
+
     pub fn enqueue(&self, event: PtyInputEvent) -> PtyInputEnqueueResult {
         self.enqueue_with_reservation(event).0
     }
@@ -310,7 +351,7 @@ impl PtyInputSender {
         if state.remote_failed && event.remote {
             return (PtyInputEnqueueResult::Failed, None);
         }
-        if event.bytes.len() > MAX_QUEUED_BYTES {
+        if event.queued_byte_len() > MAX_QUEUED_BYTES {
             return (PtyInputEnqueueResult::Oversized, None);
         }
         let reserves_release = event.kind == PtyInputKind::Press;
@@ -353,7 +394,14 @@ impl PtyInputSender {
         remote: bool,
         operation: impl FnOnce() -> anyhow::Result<()> + Send + 'static,
     ) {
-        let _ = self.enqueue_mutation_with_key(label, None, remote, None, None, operation);
+        let _ = self.enqueue_mutation(
+            label,
+            PtyMutationIdentity::default(),
+            remote,
+            None,
+            None,
+            operation,
+        );
     }
 
     pub fn enqueue_session_mutation_with_settlement(
@@ -363,9 +411,9 @@ impl PtyInputSender {
         after_operation: impl FnOnce() + Send + 'static,
         operation: impl FnOnce() -> anyhow::Result<()> + Send + 'static,
     ) {
-        let _ = self.enqueue_mutation_with_key(
+        let _ = self.enqueue_mutation(
             label,
-            None,
+            PtyMutationIdentity::default(),
             remote,
             None,
             Some(Box::new(after_operation)),
@@ -382,9 +430,9 @@ impl PtyInputSender {
         after_operation: impl FnOnce() + Send + 'static,
         operation: impl FnOnce() -> anyhow::Result<()> + Send + 'static,
     ) -> PtyInputEnqueueResult {
-        self.enqueue_mutation_with_key(
+        self.enqueue_mutation(
             label,
-            Some(key),
+            PtyMutationIdentity { coalesce_key: Some(key), ..Default::default() },
             remote,
             Some(Box::new(on_superseded)),
             Some(Box::new(after_operation)),
@@ -392,18 +440,61 @@ impl PtyInputSender {
         )
     }
 
-    fn enqueue_mutation_with_key(
+    pub fn enqueue_coalescing_surface_operation(
         &self,
         label: &'static str,
-        key: Option<(&'static str, u64)>,
+        surface_id: SurfaceId,
+        remote: bool,
+        operation: impl FnOnce() -> anyhow::Result<()> + Send + 'static,
+    ) -> PtyInputEnqueueResult {
+        self.enqueue_mutation(
+            label,
+            PtyMutationIdentity {
+                coalesce_key: Some((label, surface_id)),
+                failure_surface_id: Some(surface_id),
+                ..Default::default()
+            },
+            remote,
+            None,
+            None,
+            operation,
+        )
+    }
+
+    pub fn enqueue_surface_operation_with_retained_bytes(
+        &self,
+        label: &'static str,
+        surface_id: SurfaceId,
+        remote: bool,
+        retained_bytes: usize,
+        operation: impl FnOnce() -> anyhow::Result<()> + Send + 'static,
+    ) -> PtyInputEnqueueResult {
+        self.enqueue_mutation(
+            label,
+            PtyMutationIdentity {
+                failure_surface_id: Some(surface_id),
+                retained_bytes,
+                ..Default::default()
+            },
+            remote,
+            None,
+            None,
+            operation,
+        )
+    }
+
+    fn enqueue_mutation(
+        &self,
+        label: &'static str,
+        identity: PtyMutationIdentity,
         remote: bool,
         on_superseded: Option<Box<dyn FnOnce() + Send>>,
         after_operation: Option<Box<dyn FnOnce() + Send>>,
         operation: impl FnOnce() -> anyhow::Result<()> + Send + 'static,
     ) -> PtyInputEnqueueResult {
-        let result = self.enqueue(PtyInputEvent::mutation_with_superseded(
+        let result = self.enqueue(PtyInputEvent::mutation_for_surface(
             label,
-            key,
+            identity,
             remote,
             on_superseded,
             after_operation,
@@ -411,7 +502,7 @@ impl PtyInputSender {
         ));
         if result != PtyInputEnqueueResult::Accepted {
             (self.on_failure)(PtyOperationFailure {
-                surface_id: None,
+                surface_id: identity.failure_surface_id,
                 kind: None,
                 reservation_id: None,
                 label,
@@ -486,7 +577,7 @@ fn enqueue_bounded_with_evictions(
         for index in (0..events.len()).rev() {
             if events[index].coalesce_key == Some(key) {
                 let previous = events.remove(index).unwrap();
-                *queued_bytes = queued_bytes.saturating_sub(previous.bytes.len());
+                *queued_bytes = queued_bytes.saturating_sub(previous.queued_byte_len());
                 replaced = Some((index, previous));
                 break;
             }
@@ -500,18 +591,18 @@ fn enqueue_bounded_with_evictions(
             previous.kind == PtyInputKind::Motion && previous.surface_id == event.surface_id
         })
     {
-        let previous_len = events.back().unwrap().bytes.len();
+        let previous_len = events.back().unwrap().queued_byte_len();
         let projected_bytes = queued_bytes.saturating_sub(previous_len)
-            + event.bytes.len()
+            + event.queued_byte_len()
             + release_reservations.len() * RESERVED_RELEASE_BYTES;
         if projected_bytes > max_bytes {
             if let Some((index, previous)) = replaced.take() {
-                *queued_bytes += previous.bytes.len();
+                *queued_bytes += previous.queued_byte_len();
                 events.insert(index, previous);
             }
             return BoundedEnqueueOutcome { accepted: false, evicted, superseded: None };
         }
-        *queued_bytes = queued_bytes.saturating_sub(previous_len) + event.bytes.len();
+        *queued_bytes = queued_bytes.saturating_sub(previous_len) + event.queued_byte_len();
         *events.back_mut().unwrap() = event;
         let superseded = replaced.as_mut().and_then(|(_, previous)| previous.on_superseded.take());
         return BoundedEnqueueOutcome { accepted: true, evicted, superseded };
@@ -539,7 +630,7 @@ fn enqueue_bounded_with_evictions(
         projected -= 1;
     }
     let mut projected_bytes = *queued_bytes
-        + event.bytes.len()
+        + event.queued_byte_len()
         + (release_reservations.len() + usize::from(event.kind == PtyInputKind::Press))
             * RESERVED_RELEASE_BYTES;
     if consumes_reservation {
@@ -549,15 +640,15 @@ fn enqueue_bounded_with_evictions(
         let Some(index) = events.iter().position(|queued| queued.kind == PtyInputKind::Motion)
         else {
             if let Some((index, previous)) = replaced.take() {
-                *queued_bytes += previous.bytes.len();
+                *queued_bytes += previous.queued_byte_len();
                 events.insert(index, previous);
             }
             return BoundedEnqueueOutcome { accepted: false, evicted, superseded: None };
         };
         let removed = events.remove(index).unwrap();
-        *queued_bytes = queued_bytes.saturating_sub(removed.bytes.len());
+        *queued_bytes = queued_bytes.saturating_sub(removed.queued_byte_len());
         projected -= 1;
-        projected_bytes = projected_bytes.saturating_sub(removed.bytes.len());
+        projected_bytes = projected_bytes.saturating_sub(removed.queued_byte_len());
         evicted.push(PtyOperationFailure {
             surface_id: Some(removed.surface_id),
             kind: Some(PtyInputKind::Motion),
@@ -580,10 +671,10 @@ fn enqueue_bounded_with_evictions(
     }
 
     if merge_stream {
-        *queued_bytes += event.bytes.len();
+        *queued_bytes += event.queued_byte_len();
         events.back_mut().unwrap().bytes.extend_from_slice(&event.bytes);
     } else {
-        *queued_bytes += event.bytes.len();
+        *queued_bytes += event.queued_byte_len();
         events.push_back(event);
     }
     let superseded = replaced.as_mut().and_then(|(_, previous)| previous.on_superseded.take());
@@ -603,11 +694,11 @@ fn worker(queue: Arc<SharedQueue>, on_failure: Arc<dyn Fn(PtyOperationFailure) +
             let event = state.events.pop_front().unwrap();
             state.in_flight =
                 Some(InFlightInput { surface_id: event.surface_id, kind: event.kind });
-            state.queued_bytes = state.queued_bytes.saturating_sub(event.bytes.len());
+            state.queued_bytes = state.queued_bytes.saturating_sub(event.queued_byte_len());
             event
         };
         let kind = (event.kind != PtyInputKind::Mutation).then_some(event.kind);
-        let surface_id = kind.map(|_| event.surface_id);
+        let surface_id = kind.map(|_| event.surface_id).or(event.failure_surface_id);
         let remote = event.remote;
         let reservation_id = event.reservation_id;
         if remote && event.kind == PtyInputKind::Release {
@@ -632,9 +723,13 @@ fn worker(queue: Arc<SharedQueue>, on_failure: Arc<dyn Fn(PtyOperationFailure) +
         // have delivered a complete command. A response timeout or rejection
         // can follow a PTY write that already executed. Local PTY errors can
         // likewise occur while flushing after bytes were written.
-        let known_not_delivered =
-            remote_transport_failed || (!remote && event.surface.kind() == SurfaceKind::Browser);
-        let suppress_mutation_timeout = remote_timed_out && event.kind == PtyInputKind::Mutation;
+        let known_not_delivered = remote_transport_failed
+            || (event.kind != PtyInputKind::Mutation
+                && !remote
+                && event.surface.kind() == SurfaceKind::Browser);
+        let suppress_mutation_timeout = remote_timed_out
+            && event.kind == PtyInputKind::Mutation
+            && event.failure_surface_id.is_none();
         let ambiguous_release = remote_timed_out && event.kind == PtyInputKind::Release;
         let retry_ambiguous_release =
             ambiguous_release && event.remote_release_attempts < REMOTE_RELEASE_MAX_ATTEMPTS;
@@ -675,18 +770,23 @@ fn worker(queue: Arc<SharedQueue>, on_failure: Arc<dyn Fn(PtyOperationFailure) +
             // A failed socket write means every queued remote request shares
             // the same dead transport, so cancel the backlog immediately.
             state.remote_failed = true;
-            canceled.extend(state.events.drain(..).map(|event| PtyOperationFailure {
-                surface_id: (event.kind != PtyInputKind::Mutation).then_some(event.surface_id),
-                kind: (event.kind != PtyInputKind::Mutation).then_some(event.kind),
-                reservation_id: event.reservation_id,
-                label: event.label,
-                error: if exhausted_ambiguous_release {
-                    "canceled after mouse release recovery timed out; detach and reconnect".into()
-                } else {
-                    "canceled after the remote transport failed".into()
-                },
-                lane_failed: true,
-                delivery: PtyOperationDelivery::KnownNotDelivered,
+            canceled.extend(state.events.drain(..).map(|event| {
+                PtyOperationFailure {
+                    surface_id: (event.kind != PtyInputKind::Mutation)
+                        .then_some(event.surface_id)
+                        .or(event.failure_surface_id),
+                    kind: (event.kind != PtyInputKind::Mutation).then_some(event.kind),
+                    reservation_id: event.reservation_id,
+                    label: event.label,
+                    error: if exhausted_ambiguous_release {
+                        "canceled after mouse release recovery timed out; detach and reconnect"
+                            .into()
+                    } else {
+                        "canceled after the remote transport failed".into()
+                    },
+                    lane_failed: true,
+                    delivery: PtyOperationDelivery::KnownNotDelivered,
+                }
             }));
             state.queued_bytes = 0;
             state.release_reservations.clear();
@@ -722,7 +822,7 @@ fn worker(queue: Arc<SharedQueue>, on_failure: Arc<dyn Fn(PtyOperationFailure) +
 
 fn requeue_ambiguous_release(state: &mut QueueState, event: PtyInputEvent) {
     debug_assert_eq!(event.kind, PtyInputKind::Release);
-    state.queued_bytes += event.bytes.len();
+    state.queued_bytes += event.queued_byte_len();
     state.events.push_front(event);
 }
 
@@ -751,7 +851,9 @@ fn prune_to_recovery_releases(
             state.release_reservations.outstanding.remove(&reservation_id);
         }
         canceled.push(PtyOperationFailure {
-            surface_id: (event.kind != PtyInputKind::Mutation).then_some(event.surface_id),
+            surface_id: (event.kind != PtyInputKind::Mutation)
+                .then_some(event.surface_id)
+                .or(event.failure_surface_id),
             kind: (event.kind != PtyInputKind::Mutation).then_some(event.kind),
             reservation_id: event.reservation_id,
             label: event.label,
@@ -760,7 +862,7 @@ fn prune_to_recovery_releases(
             delivery: PtyOperationDelivery::KnownNotDelivered,
         });
     }
-    state.queued_bytes = releases.iter().map(|event| event.bytes.len()).sum();
+    state.queued_bytes = releases.iter().map(PtyInputEvent::queued_byte_len).sum();
     state.events = releases;
     canceled
 }
@@ -775,6 +877,17 @@ mod tests {
             SurfaceHandle::RemoteBrowserUnsupported,
             SmallVec::from_slice(&[bytes]),
             kind,
+        )
+    }
+
+    fn mutation_with_retained_bytes(retained_bytes: usize) -> PtyInputEvent {
+        PtyInputEvent::mutation_for_surface(
+            "retained payload",
+            PtyMutationIdentity { retained_bytes, ..Default::default() },
+            false,
+            None,
+            None,
+            || Ok(()),
         )
     }
 
@@ -931,6 +1044,31 @@ mod tests {
     }
 
     #[test]
+    fn surface_operation_failure_keeps_its_surface_identity() {
+        let (failure_tx, failure_rx) = std::sync::mpsc::channel();
+        let dispatcher = PtyInputDispatcher::spawn(move |failure| {
+            failure_tx.send(failure).unwrap();
+        })
+        .unwrap();
+
+        assert_eq!(
+            dispatcher.sender().enqueue_coalescing_surface_operation(
+                "clear terminal history",
+                42,
+                false,
+                || Err(anyhow::anyhow!("clear failed")),
+            ),
+            PtyInputEnqueueResult::Accepted
+        );
+
+        let failure = failure_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert_eq!(failure.surface_id, Some(42));
+        assert_eq!(failure.kind, None);
+        assert_eq!(failure.label, "clear terminal history");
+        assert_eq!(failure.delivery, PtyOperationDelivery::Ambiguous);
+    }
+
+    #[test]
     fn coalescing_mutations_replace_by_key_across_adjacent_resize_work() {
         let mut events = VecDeque::new();
         let mut queued_bytes = 0;
@@ -964,6 +1102,33 @@ mod tests {
             1024,
         ));
         assert_eq!(events.len(), 4);
+    }
+
+    #[test]
+    fn retained_mutation_payload_counts_toward_the_byte_limit() {
+        let mut events = VecDeque::new();
+        let mut queued_bytes = 0;
+        let mut releases = ReleaseReservations::default();
+
+        assert!(enqueue_bounded(
+            &mut events,
+            &mut queued_bytes,
+            &mut releases,
+            mutation_with_retained_bytes(6),
+            8,
+            10,
+        ));
+        assert!(!enqueue_bounded(
+            &mut events,
+            &mut queued_bytes,
+            &mut releases,
+            mutation_with_retained_bytes(5),
+            8,
+            10,
+        ));
+
+        assert_eq!(queued_bytes, 6);
+        assert_eq!(events.len(), 1);
     }
 
     #[test]
