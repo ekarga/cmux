@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="An essay by Aziz Albahar." />
+    <meta name="theme-color" content="#f3f0e8" />
+    <title>Writing — Aziz Albahar</title>
+    <link rel="icon" href="favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="styles.css" />
+    <script>
+      (() => {
+        const saved = localStorage.getItem("aziz-theme");
+        const systemDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+        document.documentElement.dataset.theme = saved || (systemDark ? "dark" : "light");
+      })();
+    </script>
+  </head>
+  <body data-page="article">
+    <a class="skip-link" href="#main-content">Skip to article</a>
+    <div class="reading-progress" aria-hidden="true"><span></span></div>
+
+    <header class="site-header">
+      <div class="shell header-inner">
+        <a class="brand" href="index.html" aria-label="Aziz Albahar, home">
+          <span class="brand-mark" aria-hidden="true">A<span>/</span></span>
+          <span class="brand-name">Aziz Albahar</span>
+        </a>
+        <nav class="desktop-nav" aria-label="Primary navigation">
+          <a class="nav-link is-active" href="index.html#writing">Writing</a>
+          <a class="nav-link" href="index.html#about">About</a>
+          <a class="nav-link" href="index.html#elsewhere">Elsewhere</a>
+        </nav>
+        <div class="header-actions">
+          <button class="icon-button search-trigger" type="button" aria-label="Search writing">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <circle cx="11" cy="11" r="6.5"></circle>
+              <path d="m16 16 4 4"></path>
+            </svg>
+            <span class="key-hint">⌘K</span>
+          </button>
+          <button class="icon-button theme-toggle" type="button" aria-label="Switch color theme">
+            <svg class="sun-icon" viewBox="0 0 24 24" aria-hidden="true">
+              <circle cx="12" cy="12" r="3.5"></circle>
+              <path d="M12 2v2M12 20v2M4.93 4.93l1.42 1.42M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.42-1.41M17.66 6.34l1.41-1.41"></path>
+            </svg>
+            <svg class="moon-icon" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M20 15.2A8.5 8.5 0 0 1 8.8 4 8.5 8.5 0 1 0 20 15.2Z"></path>
+            </svg>
+          </button>
+          <button class="menu-button" type="button" aria-expanded="false" aria-controls="mobile-menu">
+            <span></span><span></span>
+            <span class="sr-only">Toggle menu</span>
+          </button>
+        </div>
+      </div>
+      <nav id="mobile-menu" class="mobile-menu" aria-label="Mobile navigation" hidden>
+        <a href="index.html#writing">Writing</a>
+        <a href="index.html#about">About</a>
+        <a href="index.html#elsewhere">Elsewhere</a>
+      </nav>
+    </header>
+
+    <main id="main-content" class="article-main">
+      <div id="article-root"></div>
+    </main>
+
+    <footer class="site-footer article-footer">
+      <div class="shell footer-inner">
+        <a class="brand" href="index.html">
+          <span class="brand-mark" aria-hidden="true">A<span>/</span></span>
+          <span class="brand-name">Aziz Albahar</span>
+        </a>
+        <p>Built like a native app: small, fast, considered.</p>
+        <button class="back-to-top" type="button">Back to top <span aria-hidden="true">↑</span></button>
+      </div>
+    </footer>
+
+    <dialog class="search-dialog" aria-labelledby="search-title">
+      <div class="search-panel">
+        <div class="search-header">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="11" cy="11" r="6.5"></circle>
+            <path d="m16 16 4 4"></path>
+          </svg>
+          <label id="search-title" class="sr-only" for="search-input">Search writing</label>
+          <input id="search-input" type="search" placeholder="Search the notebook…" autocomplete="off" />
+          <button class="search-close" type="button" aria-label="Close search">ESC</button>
+        </div>
+        <div id="search-results" class="search-results"></div>
+        <p class="search-help">Type to search by title, topic, or idea.</p>
+      </div>
+    </dialog>
+
+    <script src="content.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>

@@ -1,0 +1,10 @@
+{
+  "name": "azizalbahar-blog",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "npm run build && python3 -m http.server 4173 -d dist",
+    "build": "node build.js",
+    "check": "node --check app.js && node --check content.js"
+  }
+}
